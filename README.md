@@ -1,0 +1,2 @@
+# django_mysql_utils
+用于django将verbose_name添加到mysql备注以及修改datetime(6)为datetime(0)
