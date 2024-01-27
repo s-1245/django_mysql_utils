@@ -15,5 +15,5 @@ INSTALLED_APPS = [
 执行完数据库迁移后执行该命令即可
 
 ```shell
-python .\manage.py django_mysql_utils
+python .\manage.py update_table
 ```

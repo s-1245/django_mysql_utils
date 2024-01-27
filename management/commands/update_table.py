@@ -1,9 +1,5 @@
-""" ADD COMMENT TO TABLE COLUMNS
-
-only support MySQL and PostgreSQL for now
-
+"""
 commands 'python manage.py addcolumncomments'
-
 """
 from django.core.management.base import BaseCommand
 from django.db import DEFAULT_DB_ALIAS, connections
@@ -11,9 +7,7 @@ from django.apps import apps
 
 
 class Command(BaseCommand):
-    name = "custom_sql"
-
-    help = 'alter table columns to add comment with the verbose_name of model'
+    help = '给mysql数据库字段添加备注,以及修改datetime的长度'
 
     def add_arguments(self, parser):
         # 增加数据库配置
@@ -24,10 +18,10 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        # 1. connect to database
+        # 1. 连接数据库
         connection = self.get_db_connection(options)
         cursor = connection.cursor()
-        # 2. find all the models defined by ourselves
+        # 2. 获取所有的模型
         models = apps.get_models()
         custom_models = [model for model in models if 'django.contrib' not in str(model)]
         # 3. know the database type
@@ -36,12 +30,13 @@ class Command(BaseCommand):
         if "mysql" in connection_type_info:
             self.mysql_add_comment(cursor, connection, custom_models)
             processed = True
-        if "postgresql" in connection_type_info:
-            self.postgresql_add_comment(cursor, connection, custom_models)
-            processed = True
+            self.mysql_update_datetime(cursor, connection, custom_models)
         if not processed:
             self.stdout.write(f"no related type for {connection_type_info}, now only support mysql and postgresql")
 
+        connection.close()
+
+    # 获取数据库连接
     def get_db_connection(self, options):
         database = options['database']
         connection = connections[database]
@@ -68,12 +63,6 @@ class Command(BaseCommand):
         return comment_text
 
     def mysql_add_comment(self, cursor, connection, custom_models):
-        """
-        if MySQL
-
-        the sql will be like:
-        ALTER TABLE children MODIFY COLUMN school varchar(100) DEFAULT NULL COMMENT '学校'
-        """
         for model_obj in custom_models:
             if not model_obj._meta.managed:
                 continue
@@ -88,21 +77,24 @@ class Command(BaseCommand):
             ddl_column_dict = {}
             for ddl_text in ddl_texts:
                 ddl_text = ddl_text.strip()
+
                 # 找到属于字段的行
                 if ddl_text[0] == '`':
                     next_index = ddl_text.index("`", 1, len(ddl_text))
                     column_key = ddl_text[1: next_index]
                     if column_key == 'id':
                         continue
-                        # 移除comment
+                    # 移除 comment
                     comment_index = ddl_text.find("COMMENT")
                     ddl_column_dict[column_key] = ddl_text[0:comment_index]
+
             # 3. 遍历model的字段
             fields = model_obj._meta.fields
             for field in fields:
                 db_column = field.db_column
                 if not db_column:
                     db_column = field.name
+
                 # 3.1 get verbose_name as comment
                 comment_text = self.get_comment_text(field, db_column)
                 if not comment_text:
@@ -117,37 +109,58 @@ class Command(BaseCommand):
                 self.stdout.write(model_comment_sql)
                 cursor.execute(model_comment_sql)
                 connection.commit()
-        connection.close()
 
-    def postgresql_add_comment(self, cursor, connection, custom_models):
-        """
-        if PostgreSQL
-
-        the sql will be like:
-        COMMENT ON COLUMN test_student.age IS '年龄'；
-        """
+    def mysql_update_datetime(self, cursor, connection, custom_models):
         for model_obj in custom_models:
             if not model_obj._meta.managed:
                 continue
-            # 1. get table_name
+            # 2.1 获取table_name
             table_name = model_obj._meta.db_table
+            # 2.2 从数据库中获取 ddl of create table ...
+            ddl_sql = "show create table " + table_name
+            cursor.execute(ddl_sql)
+            ddl_result = cursor.fetchall()
+            table_ddl = ddl_result[0][1]
+            ddl_texts = table_ddl.split("\n")
+            time_filed = []
+            ddl_column_dict = {}
+            for ddl_text in ddl_texts:
+                ddl_text = ddl_text.strip()
+
+                # 找到属于字段的行
+                if ddl_text[0] == '`':
+                    next_index = ddl_text.index("`", 1, len(ddl_text))
+                    column_key = ddl_text[1: next_index]
+                    if column_key == 'id':
+                        continue
+                    # 移除 comment
+                    comment_index = ddl_text.find("COMMENT")
+                    ddl_column_dict[column_key] = ddl_text[0:comment_index]
+
+                    if "datetime(6)" in ddl_text:
+                        time_filed.append(column_key)
+
+            # 3. 遍历model的字段
             fields = model_obj._meta.fields
             for field in fields:
                 db_column = field.db_column
                 if not db_column:
                     db_column = field.name
-                # 2. ignore Primary Key or Foreign Key
+
+                # 如果存在于datetime(6)的字段
+                if db_column not in time_filed:
+                    continue
+                model_comment_sql = "-- FOR " + table_name + "." + db_column + " \n"
+                model_comment_sql += "\t" + "ALTER TABLE " + table_name + "\n"
+                model_comment_sql += "\t" + "MODIFY COLUMN "
+
                 if not self.is_field_type_to_be_processed(field):
                     continue
-                # 3. get verbose_name as comment
-                comment_text = self.get_comment_text(field, db_column)
-                if not comment_text:
-                    continue
-                # 4. start to execute sql for comment
-                comment_sql = "COMMENT ON COLUMN " + table_name + "." + db_column + " IS '" + comment_text + "'"
-                cursor.execute(comment_sql)
-                model_comment_sql = "-- FOR " + table_name + "." + db_column + " \n"
-                model_comment_sql += "\t" + comment_sql
+
+                original_ddl = ddl_column_dict.get(db_column)
+                original_ddl = original_ddl.replace("datetime(6)", "datetime(0)")
+                model_comment_sql += original_ddl
+
                 self.stdout.write(model_comment_sql)
+                cursor.execute(model_comment_sql)
                 connection.commit()
-        connection.close()
